@@ -341,5 +341,5 @@ app.post('/webhook-sost', async (req, res) => {
 });
 
 app.listen(port, () => {
-    console.log(`Servidor do webhook rodando em http://localhost:${port}/webhook-sost2`);
+    console.log(`Servidor do webhook rodando em http://localhost:${port}/webhook-sost`);
 });
