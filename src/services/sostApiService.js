@@ -16,13 +16,25 @@ const getParcelas = async (numnota, documento) => {
 
 const getBoleto = async (numnota, documento, parcela) => {
     console.log(`Gerando boleto para a parcela: ${parcela}`);
-    const response = await sostApiClient.get(`/boleto/${numnota}/${documento}/${parcela}`);
-    
-    if (!response.data || !response.data.boleto) {
-        throw new Error('A resposta da API de boleto não continha a string Base64 esperada.');
+
+    const boletoApiUrl = `${config.sost.baseUrl}/boleto/${numnota}/${documento}/${parcela}`;
+
+    console.log(`Tentando fazer a requisição GET para a URL do boleto: ${boletoApiUrl}`);
+
+    try {
+        const response = await axios.get(boletoApiUrl, {
+            headers: {
+                'X-API-KEY': config.sost.apiKey
+            },
+            responseType: 'arraybuffer' 
+        });
+        
+        return response.data;
+
+    } catch (error) {
+        console.error(`Erro específico do Axios ao chamar a API de Boleto: ${error.message}`);
+        throw error;
     }
-    // Decodifica a string Base64 para um Buffer (dados binários do PDF)
-    return Buffer.from(response.data.boleto, 'base64');
 };
 
 module.exports = {
