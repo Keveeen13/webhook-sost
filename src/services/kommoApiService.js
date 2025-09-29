@@ -9,18 +9,18 @@ const kommoApiClient = axios.create({
     }
 });
 
-const sendMessageToLead = async (leadId, messageText) => {
-    console.log(`Enviado mensagem para o lead ${leadId}: "${messageText}"`);
-    const notePayload = [{
-        "note_type": "common",
-        "params": {
-            "text": messageText
-        }
-    }];
-    const response = await kommoApiClient.post(`/leads/${leadId}/notes`, notePayload);
-    console.log(`Mensagem enviada com sucesso para o lead ${leadId}. Status: ${response.status}`);
+const updateLeadTextField = async (leadId, fieldId, textValue) => {
+    console.log(`Atualizando campo de texto (ID: ${fieldId}) do lead ${leadId}...`);
+    const updatePayload = {
+        custom_fields_values: [{
+            field_id: fieldId,
+            values: [{ "value": textValue }]
+        }]
+    };
+    const response = await kommoApiClient.patch(`/leads/${leadId}`, updatePayload);
+    console.log(`Campo de texto (ID: ${fieldId}) atualizado com sucesso. Status: ${response.status}`);
     return response;
-}
+};
 
 const fetchLeadDetails = async (leadId, includeContacts = false) => {
     let queryParams = 'custom_fields_values';
@@ -133,7 +133,7 @@ const clearKommoFileField = async (leadId) => {
 };
 
 module.exports = {
-    sendMessageToLead,
+    updateLeadTextField,
     fetchLeadDetails,
     fetchContactDetails,
     getKommoDriveUrl,
