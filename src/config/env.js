@@ -6,7 +6,8 @@ const config = {
             pdfBoleto: parseInt(process.env.FIELD_ID_DO_CAMPO_PDF_NA_KOMMO, 10),
             numNota: parseInt(process.env.ID_CAMPO_NUMNOTA_KOMMO, 10),
             documento: parseInt(process.env.ID_CAMPO_DOCUMENTO_KOMMO, 10),
-            parcela: parseInt(process.env.ID_CAMPO_PARCELA_KOMMO, 10)
+            parcela: parseInt(process.env.ID_CAMPO_PARCELA_KOMMO, 10),
+            mensagemBot: parseInt(process.env.ID_CAMPO_MENSAGEM_BOT, 10)
         }
     },
     sost: {
@@ -16,12 +17,8 @@ const config = {
 };
 
 // Validação
-if (!config.kommo.subdomain || !config.kommo.accessToken || !config.sost.apiKey) {
-    throw new Error("Erro Crítico: Variáveis de ambiente KOMMO_SUBDOMAIN, KOMMO_ACCESS_TOKEN, ou X_API_KEY_BOLETO não definidas no .env.");
-}
-
-if (isNaN(config.kommo.fieldIds.pdfBoleto) || isNaN(config.kommo.fieldIds.numNota) || isNaN(config.kommo.fieldIds.documento)) {
-    throw new Error("Erro Crítico: IDs de campos personalizados da Kommo não foram carregados corretamente do .env ou não são números válidos.");
+if (Object.values(config.kommo.fieldIds).some(id => isNaN(id))) {
+    throw new Error("Erro Crítico: Um ou mais IDs de campos da Kommo não foram carregados do .env ou são inválidos.");
 }
 
 module.exports = config;
