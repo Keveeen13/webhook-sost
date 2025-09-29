@@ -3,9 +3,8 @@ const { handleAnnounceInstallments, handleGenerateBoleto } = require('../control
 
 const router = express.Router();
 
-router.post('/announce-installments', handleAnnounceInstallments);
+router.post('/gerar-parcelas', handleAnnounceInstallments);
 
-router.post('/generate-boleto', handleGenerateBoleto);
-
+router.post('/gerar-boleto', handleGenerateBoleto);
 
 module.exports = router;
