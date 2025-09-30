@@ -18,25 +18,47 @@ const handleAnnounceInstallments = async (req, res) => {
         const documento = leadDetails.custom_fields_values?.find(f => f.field_id === config.kommo.fieldIds.documento)?.values?.[0]?.value;
         
         if (!numnota || !documento) {
-            console.error(`Numnota ou Documento não encontrados para o lead ${leadId}.`);
             const errorMessage = 'Não foi possível encontrar o Número da Nota Fiscal ou o Documento nos campos do lead para consultar as parcelas. Por favor, verifique os dados.';
-            await kommoService.updateLeadTextField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
+            console.error(`Para o lead ${leadId}: ${errorMessage}`);
+            await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
             return res.status(400).send({ message: "Numnota ou Documento não encontrados." });
         }
 
-        const parcelas = await sostService.getParcelas(numnota, documento);
-        
-        let messageToSend;
-        if (!parcelas || parcelas.length === 0) {
-            console.log('Nenhuma parcela encontrada para a nota/documento.');
-            messageToSend = 'Não encontramos parcelas disponíveis para este boleto. Por favor, entre em contato com o suporte.';
-        } else {
-            const parcelasDisponiveis = parcelas.join(', ');
-            messageToSend = `Olá! As parcelas disponíveis para este boleto são: ${parcelasDisponiveis}. Por favor, informe em quantas parcelas você deseja dividir.`;
+        let parcelas;
+        try {
+            parcelas = await sostService.getParcelas(numnota, documento);
+        } catch (apiError) {
+             if (apiError.response && apiError.response.status === 404) {
+                console.warn('API da SOST: Nota/Documento não encontrado (404) ao buscar parcelas.');
+                await kommoService.clearKommoFileField(leadId);
+                const errorMessage = 'Não foi possível encontrar a nota fiscal ou documento para consultar as parcelas. O campo de anexo foi limpo.';
+                await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
+                return res.status(200).send({ message: `Nota/Documento não encontrado. Campo de arquivo limpo.` });
+            }
+            throw apiError; // Relança outros erros
         }
         
-        await kommoService.updateLeadTextField(leadId, config.kommo.fieldIds.mensagemBot, messageToSend);
+        if (!parcelas || parcelas.length === 0) {
+            console.log('Nenhuma parcela encontrada para a nota/documento.');
+            await kommoService.clearKommoFileField(leadId);
+            const messageToSend = 'Não encontramos parcelas disponíveis para este boleto. O campo de anexo foi limpo.';
+            await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, messageToSend);
+            return res.status(200).send({ message: 'Nenhuma parcela encontrada. Campo limpo e lead notificado.' });
+        }
+        
+        if (parcelas.length === 1) {
+            const unicaParcela = parcelas[0];
+            console.log(`Apenas uma parcela (${unicaParcela}) encontrada. Preenchendo campo automaticamente.`);
+            await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.parcela, unicaParcela);
+            const message = `Verificamos que há apenas uma parcela (${unicaParcela}) disponível para seu boleto. Já estamos processando e o enviaremos em breve.`;
+            await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, message);
+            return res.status(200).send({ message: 'Apenas uma parcela encontrada. Campo preenchido e lead notificado.' });
+        }
 
+        const parcelasDisponiveis = parcelas.join(', ');
+        const messageToSend = `Olá! As parcelas disponíveis para este boleto são: ${parcelasDisponiveis}. Por favor, informe em quantas parcelas você deseja dividir.`;
+        
+        await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, messageToSend);
         res.status(200).send({ message: 'Mensagem com opções de parcelas salva no campo do lead para o bot.' });
 
     } catch (error) {
@@ -44,7 +66,7 @@ const handleAnnounceInstallments = async (req, res) => {
         if (leadId) {
             try { 
                 const errorMessage = 'Ocorreu um erro interno ao tentar consultar suas parcelas. Nossa equipe já foi notificada.';
-                await kommoService.updateLeadTextField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
+                await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
             }
             catch (e) { console.error('Falha ao salvar mensagem de erro no campo do lead.'); }
         }
@@ -71,11 +93,11 @@ const handleGenerateBoleto = async (req, res) => {
 
         if (!numnota || !documento || !parcela) {
              const missing = ["Numnota", "Documento", "Parcela"].filter((v, i) => ![numnota, documento, parcela][i]);
-             await kommoService.sendMessageToLead(leadId, `Não foi possível gerar o boleto. O(s) campo(s) "${missing.join(', ')}" não está(ão) preenchido(s).`);
+             const errorMessage = `Não foi possível gerar o boleto. O(s) campo(s) "${missing.join(', ')}" não está(ão) preenchido(s).`;
+             console.error(`Erro para o lead ${leadId}: ${errorMessage}`);
+             await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
              return res.status(400).send({ message: `Campos necessários (${missing.join(', ')}) não encontrados.` });
         }
-
-        console.log(`Dados para gerar boleto: numnota=${numnota}, documento=${documento}, parcela=${parcela}`);
         
         const pdfData = await sostService.getBoleto(numnota, documento, parcela);
         const tamanhoArquivoBoleto = pdfData.length;
@@ -86,11 +108,11 @@ const handleGenerateBoleto = async (req, res) => {
             nomeDoContatoParaArquivo = contactDetails.first_name || contactDetails.name?.split(' ')[0];
         }
         let primeiroNomeClienteSanitizado = (nomeDoContatoParaArquivo || 'CLIENTE').toUpperCase().replace(/[^A-Z0-9À-ÖØ-ÞĀ-Ž_.-]/gi, '') || 'CLIENTE';
-        const nomeArquivoBoleto = `BOLETO_${primeiroNomeClienteSanitizado}.pdf`;
-        console.log(`PDF do boleto recebido (${tamanhoArquivoBoleto} bytes). Nome definido como: ${nomeArquivoBoleto}`);
+        const nomeArquivoBoleto = `BOLETO_${primeiroNomeClienteSanitizado}_PARCELA_${parcela}.pdf`;
+        console.log(`PDF do boleto recebido. Nome definido como: ${nomeArquivoBoleto}`);
         
         const driveUrl = await kommoService.getKommoDriveUrl();
-        const uploadUrl = await kommoService.createUploadSession(driveUrl, { fileName: nomeArquivoBoleto, fileSize: pdfData.length });
+        const uploadUrl = await kommoService.createUploadSession(driveUrl, { fileName: nomeArquivoBoleto, fileSize: tamanhoArquivoBoleto });
         const uploadResponseData = await kommoService.uploadFileToSession(uploadUrl, pdfData);
 
         const finalFileUuid = uploadResponseData?.uuid;
@@ -102,7 +124,7 @@ const handleGenerateBoleto = async (req, res) => {
         
         const fileDetails = {
             fileUuid: finalFileUuid, versionUuid: finalVersionUuid,
-            fileName: nomeArquivoBoleto, fileSize: pdfData.length
+            fileName: nomeArquivoBoleto, fileSize: tamanhoArquivoBoleto
         };
 
         const [customFieldResult, noteResult] = await Promise.allSettled([
@@ -121,7 +143,10 @@ const handleGenerateBoleto = async (req, res) => {
     } catch (error) {
         console.error('Erro no webhook de gerar boleto:', error.message);
         if (leadId) {
-            try { await kommoService.sendMessageToLead(leadId, 'Ocorreu um erro interno ao tentar gerar seu boleto. Nossa equipe já foi notificada.'); }
+            try { 
+                const errorMessage = 'Ocorreu um erro interno ao tentar gerar seu boleto. Nossa equipe já foi notificada.';
+                await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
+            }
             catch (e) { console.error('Falha ao enviar mensagem de erro para o lead.'); }
         }
         const errorStatus = error.response?.status || 500;
