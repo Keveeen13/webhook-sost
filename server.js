@@ -10,7 +10,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Carrega as rotas da aplicação
-app.use('/api', webhookRoutes); // Todas as rotas começarão com /api
+app.use('/sost', webhookRoutes); // Todas as rotas começarão com /sost
 
 app.listen(port, () => {
     console.log(`Servidor do webhook rodando em http://localhost:${port}`);
