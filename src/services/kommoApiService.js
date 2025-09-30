@@ -9,16 +9,29 @@ const kommoApiClient = axios.create({
     }
 });
 
-const updateLeadTextField = async (leadId, fieldId, textValue) => {
-    console.log(`Atualizando campo de texto (ID: ${fieldId}) do lead ${leadId}...`);
+const updateLeadSimpleField = async (leadId, fieldId, value) => {
+    console.log(`Atualizando campo (ID: ${fieldId}) do lead ${leadId}...`);
     const updatePayload = {
         custom_fields_values: [{
             field_id: fieldId,
-            values: [{ "value": textValue }]
+            values: [{ "value": value }]
         }]
     };
     const response = await kommoApiClient.patch(`/leads/${leadId}`, updatePayload);
-    console.log(`Campo de texto (ID: ${fieldId}) atualizado com sucesso. Status: ${response.status}`);
+    console.log(`Campo (ID: ${fieldId}) atualizado com sucesso. Status: ${response.status}`);
+    return response;
+};
+
+const clearKommoFileField = async (leadId) => {
+    console.log(`Limpando o campo de arquivo (ID: ${config.kommo.fieldIds.pdfBoleto}) do lead ${leadId}...`);
+    const clearPayload = {
+        custom_fields_values: [{
+            field_id: config.kommo.fieldIds.pdfBoleto,
+            values: [{ "value": null }]
+        }]
+    };
+    const response = await kommoApiClient.patch(`/leads/${leadId}`, clearPayload);
+    console.log(`Campo de arquivo do lead ${leadId} limpo. Status: ${response.status}`);
     return response;
 };
 
@@ -27,7 +40,8 @@ const fetchLeadDetails = async (leadId, includeContacts = false) => {
     if (includeContacts) {
         queryParams += ',contacts';
     }
-    const response = await kommoApiClient.get(`/leads/${leadId}?with=${queryParams}`);
+    const url = `/leads/${leadId}?with=${queryParams}`;
+    const response = await kommoApiClient.get(url);
     console.log(`Detalhes do Lead (ID: ${leadId}, includeContacts: ${includeContacts}) obtidos da Kommo.`);
     return response.data;
 };
@@ -42,7 +56,7 @@ const fetchContactDetails = async (contactId) => {
 const getKommoDriveUrl = async () => {
     console.log('Buscando Drive URL da conta Kommo...');
     const response = await kommoApiClient.get('/account?with=drive_url');
-    if (response.data && response.data.drive_url) {
+    if (response.data?.drive_url) {
         console.log('Drive URL obtido:', response.data.drive_url);
         return response.data.drive_url;
     }
@@ -75,11 +89,11 @@ const uploadFileToSession = async (uploadUrl, pdfData) => {
         }
     });
     console.log('Upload dos BYTES para Kommo Drive - Status:', response.status);
-    return response.data; // Retorna o corpo da resposta com os UUIDs finais
+    return response.data;
 };
 
 const updateLeadCustomField = async (leadId, fileDetails) => {
-    console.log(`Atualizando CAMPO PERSONALIZADO do lead ${leadId} (ID Campo: ${config.kommo.fieldIds.pdfBoleto})`);
+    console.log(`Atualizando CAMPO DE ARQUIVO do lead ${leadId} (ID Campo: ${config.kommo.fieldIds.pdfBoleto})`);
     const updatePayload = {
         custom_fields_values: [{
             field_id: config.kommo.fieldIds.pdfBoleto,
@@ -92,7 +106,7 @@ const updateLeadCustomField = async (leadId, fileDetails) => {
         }]
     };
     const response = await kommoApiClient.patch(`/leads/${leadId}`, updatePayload);
-    console.log(`Campo personalizado atualizado. Status: ${response.status}`);
+    console.log(`Campo de arquivo atualizado. Status: ${response.status}`);
     return response;
 };
 
@@ -112,28 +126,14 @@ const createAttachmentNote = async (leadId, fileDetails) => {
     let noteId = null;
     if (response.data?._embedded?.notes?.[0]) {
         noteId = response.data._embedded.notes[0].id;
-    } else if (Array.isArray(response.data) && response.data.length > 0 && response.data[0].id) {
-        noteId = response.data[0].id;
     }
     if (noteId) console.log(`Nota de anexo criada (ID Nota: ${noteId}).`);
     return { response, noteId };
 };
 
-const clearKommoFileField = async (leadId) => {
-    console.log(`Limpando o campo personalizado (ID: ${config.kommo.fieldIds.pdfBoleto}) do lead ${leadId}...`);
-    const clearPayload = {
-        custom_fields_values: [{
-            field_id: config.kommo.fieldIds.pdfBoleto,
-            values: [{ "value": null }]
-        }]
-    };
-    const response = await kommoApiClient.patch(`/leads/${leadId}`, clearPayload);
-    console.log(`Campo personalizado do lead ${leadId} limpo. Status: ${response.status}`);
-    return response;
-};
-
 module.exports = {
-    updateLeadTextField,
+    updateLeadSimpleField,
+    clearKommoFileField,
     fetchLeadDetails,
     fetchContactDetails,
     getKommoDriveUrl,
@@ -141,5 +141,4 @@ module.exports = {
     uploadFileToSession,
     updateLeadCustomField,
     createAttachmentNote,
-    clearKommoFileField
 };
