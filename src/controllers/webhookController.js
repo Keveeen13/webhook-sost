@@ -2,6 +2,24 @@ const kommoService = require('../services/kommoApiService');
 const sostService = require('../services/sostApiService');
 const config = require('../config/env');
 
+const formatParcelasList = (parcelas) => {
+    // Ordena em ordem crescente
+    const sorted = parcelas.sort((a, b) => a - b);
+    
+    if (sorted.length === 1) {
+        return `${sorted[0]} vez`;
+    }
+    
+    if (sorted.length === 2) {
+        return `${sorted[0]} ou ${sorted[1]} vezes`;
+    }
+    
+    // 3 ou mais: "X, Y ou Z vezes"
+    const allButLast = sorted.slice(0, -1).join(', ');
+    const last = sorted[sorted.length - 1];
+    return `${allButLast} ou ${last} vezes`;
+};
+
 const handleAnnounceInstallments = async (req, res) => {
     console.log('--- Webhook ANUNCIAR PARCELAS Recebido ---');
     let leadId;
@@ -55,7 +73,7 @@ const handleAnnounceInstallments = async (req, res) => {
             return res.status(200).send({ message: 'Apenas uma parcela encontrada. Campo preenchido e lead notificado.' });
         }
 
-        const parcelasDisponiveis = parcelas.join(', ');
+        const parcelasDisponiveis = formatParcelasList(parcelas);
         const messageToSend = `Olá! As parcelas disponíveis para este boleto são: ${parcelasDisponiveis}. Por favor, informe em quantas parcelas você deseja dividir.`;
         
         await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, messageToSend);
