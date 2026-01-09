@@ -1,10 +1,7 @@
 const express = require('express');
-const { handleAnnounceInstallments, handleGenerateBoleto } = require('../controllers/webhookController');
-
 const router = express.Router();
+const webhookController = require('../controllers/webhookController');
 
-router.post('/gerar-parcelas', handleAnnounceInstallments);
-
-router.post('/gerar-boleto', handleGenerateBoleto);
+router.post('/webhook-boletos', webhookController.handleBoletoFlow);
 
 module.exports = router;

@@ -1,178 +1,118 @@
-const kommoService = require('../services/kommoApiService');
-const sostService = require('../services/sostApiService');
-const config = require('../config/env');
-
-const formatParcelasList = (parcelas) => {
-    // Ordena em ordem crescente
-    const sorted = parcelas.sort((a, b) => a - b);
-    
-    if (sorted.length === 1) {
-        return `${sorted[0]} vez`;
-    }
-    
-    if (sorted.length === 2) {
-        return `${sorted[0]} ou ${sorted[1]} vezes`;
-    }
-    
-    // 3 ou mais: "X, Y ou Z vezes"
-    const allButLast = sorted.slice(0, -1).join(', ');
-    const last = sorted[sorted.length - 1];
-    return `${allButLast} ou ${last} vezes`;
-};
-
-const handleAnnounceInstallments = async (req, res) => {
-    console.log('--- Webhook ANUNCIAR PARCELAS Recebido ---');
-    let leadId;
-    
-    try {
-        leadId = req.body?.leads?.status?.[0]?.id;
-        if (!leadId) {
-            return res.status(400).send({ message: "ID do Lead não encontrado." });
-        }
-        console.log(`Lead ID extraído: ${leadId}`);
-
-        const leadDetails = await kommoService.fetchLeadDetails(leadId);
-        const numnota = leadDetails.custom_fields_values?.find(f => f.field_id === config.kommo.fieldIds.numNota)?.values?.[0]?.value;
-        const documento = leadDetails.custom_fields_values?.find(f => f.field_id === config.kommo.fieldIds.documento)?.values?.[0]?.value;
-        
-        if (!numnota || !documento) {
-            const errorMessage = 'Não foi possível encontrar o Número da Nota Fiscal ou o Documento nos campos do lead para consultar as parcelas. Por favor, verifique os dados.';
-            console.error(`Para o lead ${leadId}: ${errorMessage}`);
-            await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
-            return res.status(400).send({ message: "Numnota ou Documento não encontrados." });
-        }
-
-        let parcelas;
-        try {
-            parcelas = await sostService.getParcelas(numnota, documento);
-        } catch (apiError) {
-             if (apiError.response && apiError.response.status === 404) {
-                console.warn('API da SOST: Nota/Documento não encontrado (404) ao buscar parcelas.');
-                await kommoService.clearKommoFileField(leadId);
-                const errorMessage = 'Não foi possível encontrar a nota fiscal ou documento para consultar as parcelas. O campo de anexo foi limpo.';
-                await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
-                return res.status(200).send({ message: `Nota/Documento não encontrado. Campo de arquivo limpo.` });
-            }
-            throw apiError; // Relança outros erros
-        }
-        
-        if (!parcelas || parcelas.length === 0) {
-            console.log('Nenhuma parcela encontrada para a nota/documento.');
-            await kommoService.clearKommoFileField(leadId);
-            const messageToSend = 'Não encontramos parcelas disponíveis para este boleto. O campo de anexo foi limpo.';
-            await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, messageToSend);
-            return res.status(200).send({ message: 'Nenhuma parcela encontrada. Campo limpo e lead notificado.' });
-        }
-        
-        if (parcelas.length === 1) {
-            const unicaParcela = parcelas[0];
-            console.log(`Apenas uma parcela (${unicaParcela}) encontrada. Preenchendo campo automaticamente.`);
-            await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.parcela, unicaParcela);
-            const message = `Verificamos que há apenas uma parcela (${unicaParcela}) disponível para seu boleto. Já estamos processando e o enviaremos em breve.`;
-            await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, message);
-            return res.status(200).send({ message: 'Apenas uma parcela encontrada. Campo preenchido e lead notificado.' });
-        }
-
-        const parcelasDisponiveis = formatParcelasList(parcelas);
-        const messageToSend = `Olá! As parcelas disponíveis para este boleto são: ${parcelasDisponiveis}. Por favor, informe em quantas parcelas você deseja dividir.`;
-        
-        await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, messageToSend);
-        res.status(200).send({ message: 'Mensagem com opções de parcelas salva no campo do lead para o bot.' });
-
-    } catch (error) {
-        console.error('Erro no webhook de anunciar parcelas:', error.message);
-        if (leadId) {
-            try { 
-                const errorMessage = 'Ocorreu um erro interno ao tentar consultar suas parcelas. Nossa equipe já foi notificada.';
-                await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
-            }
-            catch (e) { console.error('Falha ao salvar mensagem de erro no campo do lead.'); }
-        }
-        res.status(500).send({ message: 'Erro ao processar webhook de anunciar parcelas.', error: error.message });
-    }
-};
-
-const handleGenerateBoleto = async (req, res) => {
-    console.log('--- Webhook GERAR BOLETO Recebido ---');
-    let leadId;
-
-    try {
-        leadId = req.body?.leads?.status?.[0]?.id;
-        if (!leadId) {
-            return res.status(400).send({ message: "ID do Lead não encontrado." });
-        }
-        console.log(`Lead ID extraído: ${leadId}`);
-
-        const leadDetails = await kommoService.fetchLeadDetails(leadId, true);
-        const customFields = leadDetails.custom_fields_values || [];
-        const numnota = customFields.find(f => f.field_id === config.kommo.fieldIds.numNota)?.values?.[0]?.value;
-        const documento = customFields.find(f => f.field_id === config.kommo.fieldIds.documento)?.values?.[0]?.value;
-        const parcela = customFields.find(f => f.field_id === config.kommo.fieldIds.parcela)?.values?.[0]?.value;
-
-        if (!numnota || !documento || !parcela) {
-             const missing = ["Numnota", "Documento", "Parcela"].filter((v, i) => ![numnota, documento, parcela][i]);
-             const errorMessage = `Não foi possível gerar o boleto. O(s) campo(s) "${missing.join(', ')}" não está(ão) preenchido(s).`;
-             console.error(`Erro para o lead ${leadId}: ${errorMessage}`);
-             await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
-             return res.status(400).send({ message: `Campos necessários (${missing.join(', ')}) não encontrados.` });
-        }
-        
-        const pdfData = await sostService.getBoleto(numnota, documento, parcela);
-        const tamanhoArquivoBoleto = pdfData.length;
-
-        let nomeDoContatoParaArquivo = null;
-        if (leadDetails._embedded?.contacts?.[0]?.id) {
-            const contactDetails = await kommoService.fetchContactDetails(leadDetails._embedded.contacts[0].id);
-            nomeDoContatoParaArquivo = contactDetails.first_name || contactDetails.name?.split(' ')[0];
-        }
-        let primeiroNomeClienteSanitizado = (nomeDoContatoParaArquivo || 'CLIENTE').toUpperCase().replace(/[^A-Z0-9À-ÖØ-ÞĀ-Ž_.-]/gi, '') || 'CLIENTE';
-        const nomeArquivoBoleto = `BOLETO_${primeiroNomeClienteSanitizado}_PARCELA_${parcela}.pdf`;
-        console.log(`PDF do boleto recebido. Nome definido como: ${nomeArquivoBoleto}`);
-        
-        const driveUrl = await kommoService.getKommoDriveUrl();
-        const uploadUrl = await kommoService.createUploadSession(driveUrl, { fileName: nomeArquivoBoleto, fileSize: tamanhoArquivoBoleto });
-        const uploadResponseData = await kommoService.uploadFileToSession(uploadUrl, pdfData);
-
-        const finalFileUuid = uploadResponseData?.uuid;
-        const finalVersionUuid = uploadResponseData?.version_uuid;
-        if (!finalFileUuid || !finalVersionUuid) {
-            throw new Error('Falha crítica: UUIDs finais do arquivo não puderam ser determinados após upload.');
-        }
-        console.log(`PDF upado para Kommo Drive. UUIDs finais obtidos.`);
-        
-        const fileDetails = {
-            fileUuid: finalFileUuid, versionUuid: finalVersionUuid,
-            fileName: nomeArquivoBoleto, fileSize: tamanhoArquivoBoleto
-        };
-
-        const [customFieldResult, noteResult] = await Promise.allSettled([
-            kommoService.updateLeadCustomField(leadId, fileDetails),
-            kommoService.createAttachmentNote(leadId, fileDetails)
-        ]);
-
-        const customFieldUpdated = customFieldResult.status === 'fulfilled';
-        const noteCreated = noteResult.status === 'fulfilled';
-        if (!customFieldUpdated) console.error("Falha ao atualizar campo personalizado:", customFieldResult.reason?.message);
-        if (!noteCreated) console.error("Falha ao criar nota de anexo:", noteResult.reason?.message);
-        
-        const finalMessage = `Webhook processado. Campo: ${customFieldUpdated ? 'OK' : 'FALHOU'}. Nota: ${noteCreated ? 'OK' : 'FALHOU'}.`;
-        res.status(200).send({ message: finalMessage, boletoFileName: nomeArquivoBoleto });
-
-    } catch (error) {
-        console.error('Erro no webhook de gerar boleto:', error.message);
-        if (leadId) {
-            try { 
-                const errorMessage = 'Ocorreu um erro interno ao tentar gerar seu boleto. Nossa equipe já foi notificada.';
-                await kommoService.updateLeadSimpleField(leadId, config.kommo.fieldIds.mensagemBot, errorMessage);
-            }
-            catch (e) { console.error('Falha ao enviar mensagem de erro para o lead.'); }
-        }
-        const errorStatus = error.response?.status || 500;
-        res.status(errorStatus).send({ message: 'Erro ao processar webhook de gerar boleto.', error: error.message });
-    }
-};
+const kommo = require('../services/kommoService');
+const sost = require('../services/sostService');
+const config = require('../config/kommo');
+const { sanitizeFileName } = require('../utils/stringUtils');
+const { formatDateBR, formatCurrencyBR } = require('../utils/formatters');
 
 module.exports = {
-    handleAnnounceInstallments,
-    handleGenerateBoleto
+    /**
+     * Gerencia o fluxo conversacional de boletos (Chatbot)
+     */
+    async handleBoletoFlow(req, res) {
+        try {
+            // 1. Extração do ID do Lead (suporta criação ou atualização)
+            const leadId = req.body.leads.add ? req.body.leads.add[0].id : req.body.leads.update[0].id;
+            const lead = await kommo.getLead(leadId);
+            
+            const cf = lead.custom_fields_values || [];
+            const cnpj = cf.find(f => f.field_id == config.fields.cnpj)?.values[0].value;
+            const resposta = cf.find(f => f.field_id == config.fields.respostaCliente)?.values[0].value;
+            const dadosTempRaw = cf.find(f => f.field_id == config.fields.dadosTemporarios)?.values[0].value;
+
+            // --- ESTADO 1: Menu Inicial (Escolha do Tipo) ---
+            // Se o cliente acabou de entrar na etapa ou não respondeu nada ainda
+            if (!resposta && !dadosTempRaw) {
+                const msg = "Menu Boletos:\n" +
+                            "*[1]* - Boletos a vencer\n" +
+                            "*[2]* - Boletos vencidos\n" +
+                            "*[3]* - Todos os boletos";
+                
+                await kommo.updateFields(leadId, [
+                    { field_id: parseInt(config.fields.menuBot), values: [{ value: msg }] }
+                ]);
+                return res.status(200).send("Menu Inicial Enviado");
+            }
+
+            // --- ESTADO 2: Lista de Parcelas (Escolha do Boleto Específico) ---
+            // Se o cliente respondeu o tipo (1, 2 ou 3) mas ainda não temos a lista salva
+            if (resposta && !dadosTempRaw) {
+                const tipos = { "1": "a_vencer", "2": "vencidos", "3": "todos" };
+                const tipoSelecionado = tipos[resposta];
+
+                if (!tipoSelecionado) return res.status(200).send("Opção de menu inválida");
+
+                const lista = await sost.getParcelas(cnpj, tipoSelecionado);
+
+                if (lista.length === 0) {
+                    await kommo.updateFields(leadId, [
+                        { field_id: parseInt(config.fields.menuBot), values: [{ value: "Não encontramos boletos para o critério selecionado. ❌" }] },
+                        { field_id: parseInt(config.fields.respostaCliente), values: [{ value: "" }] }
+                    ]);
+                    return res.status(200).send("Lista Vazia");
+                }
+
+                // Montagem da lista usando os Formatters
+                let msgLista = "*Selecione o boleto para download:*\n\n";
+                const limiteBoletos = lista.slice(0, 5);
+                
+                limiteBoletos.forEach((b, i) => {
+                    const valorFormatado = formatCurrencyBR(b.valor);
+                    const dataFormatada = formatDateBR(b.datavencimento);
+                    msgLista += `*[${i + 1}]* Boleto ${i + 1} - ${valorFormatado} - Venc: ${dataFormatada}\n`;
+                });
+
+                // Adiciona opção de "Todos" se houver mais de um boleto
+                if (limiteBoletos.length > 1) {
+                    msgLista += `*[${limiteBoletos.length + 1}]* Enviar todos os ${limiteBoletos.length} acima`;
+                }
+
+                await kommo.updateFields(leadId, [
+                    { field_id: parseInt(config.fields.menuBot), values: [{ value: msgLista }] },
+                    { field_id: parseInt(config.fields.dadosTemporarios), values: [{ value: JSON.stringify(lista) }] },
+                    { field_id: parseInt(config.fields.respostaCliente), values: [{ value: "" }] } // Limpa para próxima interação
+                ]);
+                return res.status(200).send("Lista de Boletos Enviada");
+            }
+
+            // --- ESTADO 3: Geração e Envio dos Arquivos (Finalização) ---
+            // Se temos a lista salva e o cliente escolheu um número da lista
+            if (resposta && dadosTempRaw) {
+                const boletos = JSON.parse(dadosTempRaw);
+                const escolha = parseInt(resposta);
+                const limite = boletos.slice(0, 5);
+                
+                // Verifica se escolheu a opção "Todos" (último número da lista)
+                const escolheuTodos = escolha === (limite.length + 1);
+                const boletosParaGerar = escolheuTodos ? limite : [boletos[escolha - 1]];
+
+                if (boletosParaGerar.length === 0 || !boletosParaGerar[0]) {
+                    return res.status(200).send("Escolha de boleto inválida");
+                }
+
+                // Loop de geração e upload
+                for (let i = 0; i < boletosParaGerar.length; i++) {
+                    const b = boletosParaGerar[i];
+                    const pdfBuffer = await sost.getBoleto(b.numnota, cnpj, b.prest);
+                    
+                    // Sanitiza o nome do arquivo para evitar erros de sistema
+                    const nomeFinal = sanitizeFileName(`BOLETO_${b.numnota}_P${b.prest}.pdf`);
+                    
+                    // Faz o upload e vincula ao campo de arquivo (1 a 5) correspondente
+                    await kommo.uploadFile(pdfBuffer, nomeFinal, leadId, config.fields.boletos[i]);
+                }
+
+                // Limpa o estado para que o fluxo possa ser reiniciado no futuro
+                await kommo.updateFields(leadId, [
+                    { field_id: parseInt(config.fields.menuBot), values: [{ value: "Perfeito! Seus boletos foram gerados com sucesso e estão disponíveis abaixo. 👇" }] },
+                    { field_id: parseInt(config.fields.dadosTemporarios), values: [{ value: "" }] },
+                    { field_id: parseInt(config.fields.respostaCliente), values: [{ value: "" }] }
+                ]);
+            }
+
+            res.status(200).send("Fluxo Processado");
+        } catch (error) {
+            console.error('Erro Crítico no handleBoletoFlow:', error.message);
+            res.status(500).send("Erro Interno no Servidor");
+        }
+    }
 };
