@@ -1,2 +1,6 @@
 node_modules
 .env
+backup
+server.js
+teste.js
+.env.example1

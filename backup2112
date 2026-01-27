@@ -1,0 +1,221 @@
+require('dotenv').config();
+const express = require('express');
+const axios = require('axios');
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+const config = {
+    subdomain: process.env.KOMMO_SUBDOMAIN,
+    token: process.env.KOMMO_ACCESS_TOKEN,
+    sostKey: process.env.X_API_KEY_BOLETO,
+    fields: {
+        cnpj: parseInt(process.env.ID_CAMPO_CNPJ),
+        menuBot: parseInt(process.env.ID_CAMPO_MENU_BOT), // Apenas Menu 1, 2, 3
+        listaDetalhada: parseInt(process.env.ID_CAMPO_LISTA_DETALHADA), // Novo Campo
+        respostaCliente: parseInt(process.env.ID_CAMPO_RESPOSTA_CLIENTE), // Resposta inicial (1,2,3)
+        escolhaBoleto: parseInt(process.env.ID_CAMPO_ESCOLHA_BOLETO), // Novo campo para escolha do boleto
+        dadosTemporarios: parseInt(process.env.ID_CAMPO_DADOS_TEMPORARIOS),
+        boletos: [
+            parseInt(process.env.ID_CAMPO_BOLETO_1),
+            parseInt(process.env.ID_CAMPO_BOLETO_2),
+            parseInt(process.env.ID_CAMPO_BOLETO_3),
+            parseInt(process.env.ID_CAMPO_BOLETO_4),
+            parseInt(process.env.ID_CAMPO_BOLETO_5)
+        ]
+    }
+};
+
+// --- UTILITÁRIOS ---
+const formatCurrency = (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(parseFloat(val) || 0);
+const formatDate = (dateStr) => dateStr ? new Date(dateStr.split(' ')[0]).toLocaleDateString('pt-BR') : 'N/A';
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function updateLead(leadId, fields) {
+    const url = `https://${config.subdomain}.kommo.com/api/v4/leads/${leadId}`;
+    await axios.patch(url, { custom_fields_values: fields }, {
+        headers: { 'Authorization': `Bearer ${config.token}`, 'Content-Type': 'application/json' }
+    });
+}
+
+async function uploadBoletoToKommo(leadId, boleto, fieldId, cnpj) {
+    try {
+        console.log(`--- Iniciando Processo (Drive-C) para Nota: ${boleto.numnota} ---`);
+        const driveUrl = "https://drive-c.kommo.com";
+
+        // 1. BUSCAR O PDF NA SOST (Usando arraybuffer para pegar o binário direto)
+        // Removido o tratamento como JSON pois a API envia o PDF puro
+        const sostResponse = await axios.get(`http://vpn.sost.com.br:8000/api/boleto/${boleto.numnota}/${cnpj}/${boleto.prest}`, {
+            headers: { 'X-API-KEY': config.sostKey },
+            responseType: 'arraybuffer' // Essencial para capturar o arquivo sem corromper
+        });
+
+        // 2. DEFINIR O BUFFER E O TAMANHO
+        // O pdfBuffer agora recebe os dados diretamente
+        const pdfBuffer = sostResponse.data; 
+        const realSize = pdfBuffer.length; 
+        console.log(`Arquivo recebido da SOST. Tamanho: ${realSize} bytes.`);
+
+        // 3. CRIAR SESSÃO NO DRIVE
+        console.log(`Passo 2: Criando sessão no Drive...`);
+        const fileName = `boleto_nota_${boleto.numnota}.pdf`;
+        const sessionRes = await axios.post(`${driveUrl}/v1.0/sessions`, {
+            file_name: fileName,
+            file_size: realSize,
+            content_type: 'application/pdf'
+        }, { headers: { 'Authorization': `Bearer ${config.token}` } });
+
+        const { upload_url } = sessionRes.data;
+
+        // 4. UPLOAD DO BINÁRIO (POST conforme a documentação do Drive-C)
+        console.log("Passo 3: Enviando binário para o Drive...");
+        const uploadRes = await axios.post(upload_url, pdfBuffer, {
+            headers: { 
+                'Content-Type': 'application/pdf' // O Drive-C aceita o PDF diretamente via POST
+            }
+        });
+
+        const fileUuid = uploadRes.data.uuid;
+        console.log(`Upload concluído! UUID: ${fileUuid}`);
+
+        // 5. VINCULAR ARQUIVO AO LEAD (PATCH no CRM)
+        // Nota: O passo de vincular via PUT /files é opcional se você já faz o PATCH no custom field
+        console.log("Passo 4: Vinculando ao campo do Lead...");
+        await axios.patch(`https://${config.subdomain}.kommo.com/api/v4/leads/${leadId}`, {
+            custom_fields_values: [{
+                field_id: fieldId,
+                values: [{ 
+                    value: {
+                        file_uuid: fileUuid 
+                    } 
+                }]
+            }]
+        }, { headers: { 'Authorization': `Bearer ${config.token}` } });
+
+        console.log("--- PROCESSO CONCLUÍDO COM SUCESSO ---");
+    } catch (error) {
+        console.error("### ERRO NO FLUXO ###");
+        // Log detalhado para capturar erros da API Kommo
+        console.error(error.response?.data || error.message);
+    }
+}
+
+async function gerarListaDetalhada(leadId, cnpj, resposta) {
+    console.log(`-> CNPJ Detectado! Buscando boletos para tipo ${resposta}...`);
+    
+    const tipos = { "1": "a_vencer", "2": "vencidos", "3": "todos" };
+    const parcelasRes = await axios.get(`http://vpn.sost.com.br:8000/api/parcelas/${cnpj}/${tipos[resposta]}`, {
+        headers: { 'X-API-KEY': config.sostKey }
+    });
+
+    const lista = parcelasRes.data.dados || [];
+    if (lista.length === 0) {
+        await updateLead(leadId, [{ field_id: config.fields.listaDetalhada, values: [{ value: "Nenhum boleto encontrado para este CNPJ. ❌" }] }]);
+        return "Sem boletos";
+    }
+
+    // Monta a Lista Detalhada
+    let msgLista = `*Selecione o boleto desejado:*\n`;
+    const top10 = lista.slice(0, 10);
+    top10.forEach((b, i) => {
+        msgLista += `[${i + 1}] Boleto ${i + 1} - [Nota ${b.numnota}] - ${formatDate(b.datavencimento)} - ${formatCurrency(b.valor)} - ${b.prest} parcela\n`;
+    });
+    msgLista += `[${top10.length + 1}] Todos (Apenas os primeiros)`;
+
+    // Atualiza o NOVO CAMPO da lista detalhada
+    await updateLead(leadId, [
+        { field_id: config.fields.listaDetalhada, values: [{ value: msgLista }] },
+        { field_id: config.fields.dadosTemporarios, values: [{ value: JSON.stringify(lista) }] },
+        { field_id: config.fields.escolhaBoleto, values: [{ value: "" }] } // Limpa para esperar a escolha do boleto
+    ]);
+    console.log("-> Lista Detalhada enviada para o campo novo.");
+    return "Lista Gerada";
+}
+
+// --- LÓGICA DO WEBHOOK ---
+app.post('/webhook-boletos', async (req, res) => {
+    try {
+        console.log('\n--- 🛰️ Webhook Acionado ---');
+        await sleep(1500); // Pequena pausa para garantir gravação no banco da Kommo
+
+        const leads = req.body.leads;
+        const leadData = leads.add || leads.update || leads.status;
+        const leadId = leadData ? leadData[0].id : null;
+
+        if (!leadId) return res.status(400).send("ID ausente");
+
+        let tentativas = 0;
+        const maxTentativas = 10; // Máximo 10 tentativas (100 segundos)
+
+        // Loop único: Verificar condições em sequência
+        while (tentativas < maxTentativas) {
+            // Busca dados frescos do Lead
+            const leadRes = await axios.get(`https://${config.subdomain}.kommo.com/api/v4/leads/${leadId}`, {
+                headers: { 'Authorization': `Bearer ${config.token}` }
+            });
+            
+            const cf = leadRes.data.custom_fields_values || [];
+            const cnpj = cf.find(f => f.field_id == config.fields.cnpj)?.values[0].value;
+            const resposta = cf.find(f => f.field_id == config.fields.respostaCliente)?.values[0].value;
+            const escolha = cf.find(f => f.field_id == config.fields.escolhaBoleto)?.values[0].value;
+            const dadosTemp = cf.find(f => f.field_id == config.fields.dadosTemporarios)?.values[0].value;
+
+            console.log(`Tentativa ${tentativas + 1}: Lead: ${leadId} | CNPJ: ${cnpj ? 'OK' : 'Vazio'} | Resposta: ${resposta || 'Vazio'} | Escolha: ${escolha || 'Vazio'} | DadosTemp: ${dadosTemp ? 'OK' : 'Vazio'}`);
+
+            // Condição 1: Se CNPJ e Resposta inicial preenchidos, e dadosTemp vazio, gerar lista
+            if (cnpj && resposta && (!dadosTemp || dadosTemp === "") && ["1","2","3"].includes(resposta.toString())) {
+                const result = await gerarListaDetalhada(leadId, cnpj, resposta);
+                console.log("Lista gerada, continuando verificações...");
+                // Não sai, continua o loop para verificar escolha
+            }
+
+            // Condição 2: Se dadosTemp preenchido e escolha é válida, fazer upload
+            if (dadosTemp && dadosTemp !== "" && escolha) {
+                console.log(`-> Gerando PDF para escolha ${escolha}...`);
+                
+                const lista = JSON.parse(dadosTemp);
+                const top10 = lista.slice(0, 10);
+                let boletosSelecionados = [];
+                
+                const escolhaNum = parseInt(escolha);
+                if (escolhaNum === top10.length + 1) {
+                    // Todos (máximo 5)
+                    boletosSelecionados = top10.slice(0, 5);
+                } else if (escolhaNum >= 1 && escolhaNum <= top10.length) {
+                    boletosSelecionados = [top10[escolhaNum - 1]];
+                } else {
+                    console.log("Escolha inválida");
+                    tentativas++;
+                    if (tentativas < maxTentativas) await sleep(10000);
+                    continue;
+                }
+                
+                // Upload dos PDFs
+                for (let i = 0; i < boletosSelecionados.length && i < 5; i++) {
+                    const boleto = boletosSelecionados[i];
+                    await uploadBoletoToKommo(leadId, boleto, config.fields.boletos[i], cnpj);
+                }
+                
+                return res.status(200).send("PDFs Gerados");
+            }
+
+            // Se nenhuma condição atendida, aguardar e tentar novamente
+            tentativas++;
+            if (tentativas < maxTentativas) {
+                await sleep(10000);
+            }
+        }
+
+        // Timeout
+        console.log("-> Máximo de tentativas atingido.");
+        res.status(200).send("Aguardando preenchimento");
+    } catch (err) {
+        console.error("Erro:", err.message);
+        res.status(500).send("Erro");
+    }
+});
+
+app.listen(port, () => console.log(`🚀 API rodando na portaa ${port}`));
