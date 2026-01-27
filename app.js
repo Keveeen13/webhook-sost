@@ -147,67 +147,94 @@ async function gerarListaDetalhada(leadId, cnpj, resposta) {
 app.post('/webhook-boletos', async (req, res) => {
     res.status(200).send("Monitoramento iniciado");
     try {
-        console.log('\n--- 🛰️ Webhook Acionado ---');
-        await sleep(1500);
-
         const leads = req.body.leads;
-        const leadData = leads.add || leads.update || leads.status;
+        const leadData = leads?.update || leads?.status || leads?.add;
         const leadId = leadData ? leadData[0].id : null;
+        if (!leadId) return;
 
-        if (!leadId) return res.status(400).send("ID ausente");
+        console.log(`\n--- 🛰️ Webhook Acionado (Lead: ${leadId}) ---`);
 
         let tentativas = 0;
-        const maxTentativas = 30;
+        const maxTentativas = 30; // Monitora por até 5 minutos
 
         while (tentativas < maxTentativas) {
             try {
-            const leadRes = await axios.get(`https://${config.subdomain}.kommo.com/api/v4/leads/${leadId}`, {
-                headers: { 'Authorization': `Bearer ${config.token}` }
-            });
-            
-            const cf = leadRes.data.custom_fields_values || [];
-            const cnpj = cf.find(f => f.field_id == config.fields.cnpj)?.values[0].value;
-            const resposta = cf.find(f => f.field_id == config.fields.respostaCliente)?.values[0].value;
-            const escolha = cf.find(f => f.field_id == config.fields.escolhaBoleto)?.values[0].value;
-            const dadosTemp = cf.find(f => f.field_id == config.fields.dadosTemporarios)?.values[0].value;
+                // Busca dados frescos do Lead a cada volta do loop
+                const leadRes = await axios.get(`https://${config.subdomain}.kommo.com/api/v4/leads/${leadId}`, {
+                    headers: { 'Authorization': `Bearer ${config.token}` }
+                });
+                
+                const cf = leadRes.data.custom_fields_values || [];
+                const cnpj = cf.find(f => f.field_id == config.fields.cnpj)?.values[0].value;
+                const resposta = cf.find(f => f.field_id == config.fields.respostaCliente)?.values[0].value;
+                const escolha = cf.find(f => f.field_id == config.fields.escolhaBoleto)?.values[0].value;
+                const dadosTemp = cf.find(f => f.field_id == config.fields.dadosTemporarios)?.values[0].value;
 
-            console.log(`Tentativa ${tentativas + 1}: Lead: ${leadId} | CNPJ: ${cnpj ? 'OK' : 'Vazio'} | Resposta: ${resposta || 'Vazio'} | Escolha: ${escolha || 'Vazio'}`);
+                console.log(`Tentativa ${tentativas + 1}: CNPJ: ${cnpj || 'Vazio'} | Resposta: ${resposta || 'Vazio'} | Escolha: ${escolha || 'Vazio'} | DadosTemp: ${dadosTemp ? 'OK' : 'Vazio'}`);
 
-            // FASE 1: Gerar Lista
-            if (cnpj && resposta && (!dadosTemp || dadosTemp === "") && ["1","2","3"].includes(resposta.toString())) {
-                await gerarListaDetalhada(leadId, cnpj, resposta);
-            }
+                // --- 🛑 PRIORIDADE: VERIFICAÇÃO DA OPÇÃO 4 (FINALIZAR) ---
+                if (resposta?.toString() === "4") {
+                    console.log("-> Opção 4 detectada! Limpando campos e finalizando monitoramento.");
+                    
+                    // Limpa todos os campos de controle para deixar o lead pronto para a próxima vez
+                    await updateLead(leadId, [
+                        { field_id: config.fields.respostaCliente, values: [{ value: "" }] },
+                        { field_id: config.fields.dadosTemporarios, values: [{ value: "" }] },
+                        { field_id: config.fields.escolhaBoleto, values: [{ value: "" }] },
+                        { field_id: config.fields.listaDetalhada, values: [{ value: "" }] },
+                        { field_id: config.fields.cnpj, values: [{ value: "" }] }
+                    ]);
+                    
+                    console.log("✅ Sessão encerrada com sucesso.");
+                    return; // Para o webhook aqui
+                }
 
-            // FASE 2: Processar Escolha e Upload
-            if (cnpj && dadosTemp && escolha && escolha !== "") {
+                // --- FASE 1: GERAR LISTA (1, 2 ou 3) ---
+                if (cnpj && ["1","2","3"].includes(resposta?.toString()) && (!dadosTemp || dadosTemp === "")) {
+                    await gerarListaDetalhada(leadId, cnpj, resposta);
+                    // Não damos 'return' para continuar verificando a escolha do boleto logo em seguida
+                }
+
+                // --- FASE 2: PROCESSAR ESCOLHA E UPLOAD ---
+                if (cnpj && dadosTemp && escolha && escolha !== "") {
                     const lista = JSON.parse(dadosTemp);
                     const escolhaNum = parseInt(escolha);
+                    
+                    // Se a escolha for o índice "Todos" ou um boleto específico
                     const selecionados = (escolhaNum === lista.length + 1) ? lista.slice(0, 5) : [lista[escolhaNum - 1]];
 
                     if (selecionados[0]) {
+                        console.log(`-> Processando ${selecionados.length} boleto(s)...`);
                         for (let i = 0; i < selecionados.length; i++) {
                             await uploadBoletoToKommo(leadId, selecionados[i], config.fields.boletos[i], cnpj);
                         }
-                        // Se chegou aqui, terminou com sucesso. Limpa e sai do loop.
+                        
+                        // Limpa os campos de controle após o sucesso
                         await updateLead(leadId, [
                             { field_id: config.fields.escolhaBoleto, values: [{ value: "" }] },
-                            { field_id: config.fields.dadosTemporarios, values: [{ value: "" }] }
+                            { field_id: config.fields.dadosTemporarios, values: [{ value: "" }] },
+                            { field_id: config.fields.respostaCliente, values: [{ value: "" }] },
+                            { field_id: config.fields.listaDetalhada, values: [{ value: "" }] },
+                            { field_id: config.fields.cnpj, values: [{ value: "" }] },
                         ]);
-                        console.log("✅ Ciclo finalizado com sucesso.");
-                        return; 
+                        
+                        console.log("✅ Ciclo de boletos finalizado com sucesso.");
+                        return; // Encerra o monitoramento
                     }
                 }
+
             } catch (innerError) {
-                // Se der erro em uma tentativa (ex: instabilidade na API), ele cai aqui e continua o loop
                 console.error(`⚠️ Erro na tentativa ${tentativas + 1}:`, innerError.message);
             }
 
             tentativas++;
-            await sleep(10000);
+            await sleep(10000); // Aguarda 10 segundos para a próxima verificação
         }
-        console.log("-> Monitoramento encerrado por tempo limite (Timeout).");
+        
+        console.log("-> Monitoramento encerrado por limite de tempo (Timeout).");
+
     } catch (err) {
-        console.error("Erro no Webhook:", err.message);
+        console.error("Erro crítico no monitoramento:", err.message);
     }
 });
 
