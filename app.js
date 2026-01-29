@@ -21,6 +21,7 @@ const config = {
         dadosTemporarios: parseInt(process.env.ID_CAMPO_DADOS_TEMPORARIOS),
         erroBoleto: parseInt(process.env.ID_CAMPO_ERRO_BOLETO),
         boletoNaoEncontrado: parseInt(process.env.ID_CAMPO_BOLETO_NAO_ENCONTRADO),
+        outroBoleto: parseInt(process.env.ID_CAMPO_OUTRO_BOLETO),
         boletos: [
             parseInt(process.env.ID_CAMPO_BOLETO_1),
             parseInt(process.env.ID_CAMPO_BOLETO_2),
@@ -112,34 +113,31 @@ async function gerarListaDetalhada(leadId, cnpj, resposta) {
 
         const lista = parcelasRes.data.dados || [];
         
-        // Se a API retornar sucesso mas lista vazia, tratamos como não encontrado
         if (lista.length === 0) throw { response: { status: 404 } };
 
         let msgLista = `*Selecione o boleto desejado:*\n`;
         lista.slice(0, 10).forEach((b, i) => {
             msgLista += `[${i + 1}] Boleto ${i + 1} - [Nota ${b.numnota}] - ${formatDate(b.datavencimento)} - ${formatCurrency(b.valor)} - ${b.prest} parcela\n`;
         });
-        msgLista += `[${lista.length + 1}] Todos`;
 
+        // ATUALIZAÇÃO: Limpa a resposta do cliente para parar o loop de busca
         await updateLead(leadId, [
             { field_id: config.fields.listaDetalhada, values: [{ value: msgLista }] },
             { field_id: config.fields.dadosTemporarios, values: [{ value: JSON.stringify(lista) }] },
+            { field_id: config.fields.respostaCliente, values: [{ value: "" }] }, 
             { field_id: config.fields.escolhaBoleto, values: [{ value: "" }] },
-            { field_id: config.fields.boletoNaoEncontrado, values: [{ value: false }] } // Desliga o erro se achar
+            { field_id: config.fields.boletoNaoEncontrado, values: [{ value: false }] }
         ]);
-        console.log("-> Lista Detalhada enviada.");
-        return true;
+        console.log("-> Lista enviada e gatilho de busca limpo.");
 
     } catch (error) {
-        if (error.response && error.response.status === 404) {
-            console.log(`⚠️ 404: Boletos não encontrados para o CNPJ ${cnpj}. Ativando interruptor...`);
+        if (error.response?.status === 404) {
+            console.log("⚠️ 404: Nenhum boleto. Limpando gatilho e ativando aviso...");
             await updateLead(leadId, [
-                { field_id: config.fields.boletoNaoEncontrado, values: [{ value: true }] }
+                { field_id: config.fields.boletoNaoEncontrado, values: [{ value: true }] },
+                { field_id: config.fields.respostaCliente, values: [{ value: "" }] } // Limpa para não repetir o erro
             ]);
-            return false;
         }
-        console.error("Erro na busca da lista:", error.message);
-        throw error;
     }
 }
 
@@ -155,11 +153,10 @@ app.post('/webhook-boletos', async (req, res) => {
         console.log(`\n--- 🛰️ Webhook Acionado (Lead: ${leadId}) ---`);
 
         let tentativas = 0;
-        const maxTentativas = 30; // Monitora por até 5 minutos
+        const maxTentativas = 60; // Monitora por até 10 minutos
 
         while (tentativas < maxTentativas) {
             try {
-                // Busca dados frescos do Lead a cada volta do loop
                 const leadRes = await axios.get(`https://${config.subdomain}.kommo.com/api/v4/leads/${leadId}`, {
                     headers: { 'Authorization': `Bearer ${config.token}` }
                 });
@@ -169,72 +166,74 @@ app.post('/webhook-boletos', async (req, res) => {
                 const resposta = cf.find(f => f.field_id == config.fields.respostaCliente)?.values[0].value;
                 const escolha = cf.find(f => f.field_id == config.fields.escolhaBoleto)?.values[0].value;
                 const dadosTemp = cf.find(f => f.field_id == config.fields.dadosTemporarios)?.values[0].value;
+                const outro = cf.find(f => f.field_id == config.fields.outroBoleto)?.values[0].value;
 
-                console.log(`Tentativa ${tentativas + 1}: CNPJ: ${cnpj || 'Vazio'} | Resposta: ${resposta || 'Vazio'} | Escolha: ${escolha || 'Vazio'} | DadosTemp: ${dadosTemp ? 'OK' : 'Vazio'}`);
+                console.log(`Tentativa ${tentativas + 1}: CNPJ: ${cnpj || '...'} | Resposta: ${resposta || '...'} | Escolha: ${escolha || '...'} | Outro: ${outro || '...'}`);
 
-                // --- 🛑 PRIORIDADE: VERIFICAÇÃO DA OPÇÃO 4 (FINALIZAR) ---
+                // 🛑 SAÍDA 1: Opção 4 no Menu Principal
                 if (resposta?.toString() === "4") {
-                    console.log("-> Opção 4 detectada! Limpando campos e finalizando monitoramento.");
-                    
-                    // Limpa todos os campos de controle para deixar o lead pronto para a próxima vez
+                    console.log("-> Encerrando por opção 4.");
+                    await updateLead(leadId, [{ field_id: config.fields.respostaCliente, values: [{ value: "" }] }]);
+                    return;
+                }
+
+                // 🛑 SAÍDA 2: Opção "Não" (2) no campo Outro Boleto
+                if (outro?.toString() === "2") {
+                    console.log("-> Encerrando: Cliente não quer mais boletos.");
                     await updateLead(leadId, [
-                        { field_id: config.fields.respostaCliente, values: [{ value: "" }] },
-                        { field_id: config.fields.dadosTemporarios, values: [{ value: "" }] },
-                        { field_id: config.fields.escolhaBoleto, values: [{ value: "" }] },
-                        { field_id: config.fields.listaDetalhada, values: [{ value: "" }] },
-                        { field_id: config.fields.cnpj, values: [{ value: "" }] }
+                        { field_id: config.fields.outroBoleto, values: [{ value: "" }] },
+                        { field_id: config.fields.dadosTemporarios, values: [{ value: "" }] }
                     ]);
-                    
-                    console.log("✅ Sessão encerrada com sucesso.");
-                    return; // Para o webhook aqui
+                    return;
                 }
 
-                // --- FASE 1: GERAR LISTA (1, 2 ou 3) ---
+                // 🔄 RESET: Se o cliente quer "Sim" (1), limpa para permitir nova escolha
+                if (outro?.toString() === "1") {
+                    console.log("-> Cliente quer outro boleto. Resetando campos de escolha...");
+                    await updateLead(leadId, [
+                        { field_id: config.fields.outroBoleto, values: [{ value: "" }] },
+                        { field_id: config.fields.escolhaBoleto, values: [{ value: "" }] }
+                    ]);
+                    // O loop continua e o bot (lado Kommo) deve mostrar a lista novamente
+                }
+
+                // FASE 1: Gerar lista inicial
                 if (cnpj && ["1","2","3"].includes(resposta?.toString()) && (!dadosTemp || dadosTemp === "")) {
+                    console.log(`-> Gatilho detectado para tipo ${resposta}. Iniciando busca única...`);
+                    
+                    // Opcional: Limpa o campo resposta NO CRM antes mesmo de terminar a busca 
+                    // para evitar que outra tentativa do loop entre aqui.
+                    await updateLead(leadId, [{ field_id: config.fields.respostaCliente, values: [{ value: "PROCESSANDO..." }] }]);
+                    
                     await gerarListaDetalhada(leadId, cnpj, resposta);
-                    // Não damos 'return' para continuar verificando a escolha do boleto logo em seguida
+                    continue; // Pula para a próxima iteração do loop para ler os novos dados
                 }
 
-                // --- FASE 2: PROCESSAR ESCOLHA E UPLOAD ---
+                // FASE 2: Processar escolha e enviar (Sempre no mesmo campo)
                 if (cnpj && dadosTemp && escolha && escolha !== "") {
                     const lista = JSON.parse(dadosTemp);
-                    const escolhaNum = parseInt(escolha);
-                    
-                    // Se a escolha for o índice "Todos" ou um boleto específico
-                    const selecionados = (escolhaNum === lista.length + 1) ? lista.slice(0, 5) : [lista[escolhaNum - 1]];
+                    const index = parseInt(escolha) - 1;
+                    const boleto = lista[index];
 
-                    if (selecionados[0]) {
-                        console.log(`-> Processando ${selecionados.length} boleto(s)...`);
-                        for (let i = 0; i < selecionados.length; i++) {
-                            await uploadBoletoToKommo(leadId, selecionados[i], config.fields.boletos[i], cnpj);
-                        }
+                    if (boleto) {
+                        console.log(`-> Enviando boleto da Nota ${boleto.numnota}...`);
+                        await uploadBoletoToKommo(leadId, boleto, config.fields.boletos[0], cnpj);
                         
-                        // Limpa os campos de controle após o sucesso
-                        await updateLead(leadId, [
-                            { field_id: config.fields.escolhaBoleto, values: [{ value: "" }] },
-                            { field_id: config.fields.dadosTemporarios, values: [{ value: "" }] },
-                            { field_id: config.fields.respostaCliente, values: [{ value: "" }] },
-                            { field_id: config.fields.listaDetalhada, values: [{ value: "" }] },
-                            { field_id: config.fields.cnpj, values: [{ value: "" }] },
-                        ]);
-                        
-                        console.log("✅ Ciclo de boletos finalizado com sucesso.");
-                        return; // Encerra o monitoramento
+                        // LIMPEZA PÓS-ENVIO: Limpa a escolha para não enviar o mesmo arquivo repetidamente
+                        await updateLead(leadId, [{ field_id: config.fields.escolhaBoleto, values: [{ value: "" }] }]);
+                        console.log("✅ Boleto enviado. Aguardando decisão 'Outro Boleto'...");
                     }
                 }
 
             } catch (innerError) {
-                console.error(`⚠️ Erro na tentativa ${tentativas + 1}:`, innerError.message);
+                console.error(`Erro na verificação: ${innerError.message}`);
             }
 
             tentativas++;
-            await sleep(10000); // Aguarda 10 segundos para a próxima verificação
+            await sleep(10000); 
         }
-        
-        console.log("-> Monitoramento encerrado por limite de tempo (Timeout).");
-
     } catch (err) {
-        console.error("Erro crítico no monitoramento:", err.message);
+        console.error("Erro crítico:", err.message);
     }
 });
 
