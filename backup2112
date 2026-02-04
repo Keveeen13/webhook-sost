@@ -3,7 +3,7 @@ const express = require('express');
 const axios = require('axios');
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 4000;
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -142,7 +142,7 @@ async function gerarListaDetalhada(leadId, cnpj, resposta) {
 }
 
 // --- LÓGICA DO WEBHOOK ---
-app.post('/webhook-boletos', async (req, res) => {
+app.post('/sost', async (req, res) => {
     res.status(200).send("Monitoramento iniciado");
     try {
         const leads = req.body.leads;
@@ -211,6 +211,14 @@ app.post('/webhook-boletos', async (req, res) => {
 
                 // FASE 2: Processar escolha e enviar (Sempre no mesmo campo)
                 if (cnpj && dadosTemp && escolha && escolha !== "") {
+                    // SEGURANÇA CONTRA ERRO DE JSON (image_742455.png)
+                    if (typeof dadosTemp === 'string' && !dadosTemp.startsWith('[')) {
+                        console.log("⚠️ JSON corrompido detectado no campo Dados Temporários. Limpando...");
+                        await updateLead(leadId, [{ field_id: config.fields.dadosTemporarios, values: [{ value: "" }] }]);
+                        tentativas++;
+                        continue;
+                    }
+
                     const lista = JSON.parse(dadosTemp);
                     const index = parseInt(escolha) - 1;
                     const boleto = lista[index];
@@ -225,14 +233,14 @@ app.post('/webhook-boletos', async (req, res) => {
                     }
                 }
 
-            } catch (innerError) {
+            } catch (innerError) { // <--- CATCH INTERNO: Mantém o loop vivo
                 console.error(`Erro na verificação: ${innerError.message}`);
             }
 
             tentativas++;
             await sleep(10000); 
         }
-    } catch (err) {
+    } catch (err) { // <--- CATCH EXTERNO: Falha crítica total
         console.error("Erro crítico:", err.message);
     }
 });
