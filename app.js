@@ -115,9 +115,17 @@ async function gerarListaDetalhada(leadId, cnpj, resposta) {
         
         if (lista.length === 0) throw { response: { status: 404 } };
 
+        // Ordena a lista por data de vencimento (mais próximo primeiro)
+        lista.sort((a, b) => {
+            const da = a?.datavencimento ? new Date(a.datavencimento.split(' ')[0]) : new Date(0);
+            const db = b?.datavencimento ? new Date(b.datavencimento.split(' ')[0]) : new Date(0);
+            return da - db;
+        });
+
         let msgLista = `*Selecione o boleto desejado:*\n`;
-        lista.slice(0, 10).forEach((b, i) => {
-            msgLista += `[${i + 1}] Boleto ${i + 1} - [Nota ${b.numnota}] - ${formatDate(b.datavencimento)} - ${formatCurrency(b.valor)} - ${b.prest} parcela\n`;
+        const top10 = lista.slice(0, 10);
+        top10.forEach((b, i) => {
+            msgLista += `[${i + 1}] Boleto ${i + 1} - [NF ${b.numnota}] - ${formatDate(b.datavencimento)} - ${formatCurrency(b.valor)} - ${b.prest} PC\n`;
         });
 
         // ATUALIZAÇÃO: Limpa a resposta do cliente para parar o loop de busca
@@ -177,8 +185,8 @@ app.post('/sost', async (req, res) => {
                     return;
                 }
 
-                // 🛑 SAÍDA 2: Opção "Não" (2) no campo Outro Boleto
-                if (outro?.toString() === "2") {
+                // 🛑 SAÍDA 2: Opção "Não" (2) ou "Cancelar" (3) no campo Outro Boleto
+                if (outro?.toString() === "2" || outro?.toString() === "3") {
                     console.log("-> Encerrando: Cliente não quer mais boletos.");
                     await updateLead(leadId, [
                         { field_id: config.fields.outroBoleto, values: [{ value: "" }] },
