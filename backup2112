@@ -22,6 +22,7 @@ const config = {
         erroBoleto: parseInt(process.env.ID_CAMPO_ERRO_BOLETO),
         boletoNaoEncontrado: parseInt(process.env.ID_CAMPO_BOLETO_NAO_ENCONTRADO),
         outroBoleto: parseInt(process.env.ID_CAMPO_OUTRO_BOLETO),
+        numeroNotaFiscal: parseInt(process.env.ID_CAMPO_NUMERO_NOTA_FISCAL),
         boletos: [
             parseInt(process.env.ID_CAMPO_BOLETO_1),
             parseInt(process.env.ID_CAMPO_BOLETO_2),
@@ -107,6 +108,13 @@ async function gerarListaDetalhada(leadId, cnpj, resposta) {
     try {
         console.log(`-> Buscando boletos para tipo ${resposta}...`);
         const tipos = { "1": "a_vencer", "2": "vencidos", "3": "todos" };
+        
+        // Valida se a resposta é um tipo válido
+        if (!tipos[resposta?.toString()]) {
+            console.log(`⚠️ Resposta inválida: ${resposta}. Encerrando...`);
+            throw { response: { status: 400 } };
+        }
+        
         const parcelasRes = await axios.get(`http://vpn.sost.com.br:8000/api/parcelas/${cnpj}/${tipos[resposta]}`, {
             headers: { 'X-API-KEY': config.sostKey }
         });
@@ -178,9 +186,9 @@ app.post('/sost', async (req, res) => {
 
                 console.log(`Tentativa ${tentativas + 1}: CNPJ: ${cnpj || '...'} | Resposta: ${resposta || '...'} | Escolha: ${escolha || '...'} | Outro: ${outro || '...'}`);
 
-                // 🛑 SAÍDA 1: Opção 4 no Menu Principal
-                if (resposta?.toString() === "4") {
-                    console.log("-> Encerrando por opção 4.");
+                // 🛑 SAÍDA 1: Opção 0 no Menu Principal
+                if (resposta?.toString() === "0") {
+                    console.log("-> Encerrando por opção 0.");
                     await updateLead(leadId, [{ field_id: config.fields.respostaCliente, values: [{ value: "" }] }]);
                     return;
                 }
@@ -235,9 +243,12 @@ app.post('/sost', async (req, res) => {
                         console.log(`-> Enviando boleto da Nota ${boleto.numnota}...`);
                         await uploadBoletoToKommo(leadId, boleto, config.fields.boletos[0], cnpj);
                         
-                        // LIMPEZA PÓS-ENVIO: Limpa a escolha para não enviar o mesmo arquivo repetidamente
-                        await updateLead(leadId, [{ field_id: config.fields.escolhaBoleto, values: [{ value: "" }] }]);
-                        console.log("✅ Boleto enviado. Aguardando decisão 'Outro Boleto'...");
+                        // Salva o número da nota fiscal e limpa a escolha
+                        await updateLead(leadId, [
+                            { field_id: config.fields.numeroNotaFiscal, values: [{ value: boleto.numnota }] },
+                            { field_id: config.fields.escolhaBoleto, values: [{ value: "" }] }
+                        ]);
+                        console.log("✅ Boleto enviado. Número da nota fiscal salvo. Aguardando decisão 'Outro Boleto'...");
                     }
                 }
 
