@@ -23,6 +23,7 @@ const config = {
         boletoNaoEncontrado: parseInt(process.env.ID_CAMPO_BOLETO_NAO_ENCONTRADO),
         outroBoleto: parseInt(process.env.ID_CAMPO_OUTRO_BOLETO),
         numeroNotaFiscal: parseInt(process.env.ID_CAMPO_NUMERO_NOTA_FISCAL),
+        erroEscolhaBoleto: parseInt(process.env.ID_CAMPO_ERRO_ESCOLHA_BOLETO),
         boletos: [
             parseInt(process.env.ID_CAMPO_BOLETO_1),
             parseInt(process.env.ID_CAMPO_BOLETO_2),
@@ -236,7 +237,21 @@ app.post('/sost', async (req, res) => {
                     }
 
                     const lista = JSON.parse(dadosTemp);
-                    const index = parseInt(escolha) - 1;
+                    const escolhaNum = parseInt(escolha);
+                    const index = escolhaNum - 1;
+
+                    // VALIDAÇÃO DA ESCOLHA: Verifica se é um número válido dentro do intervalo
+                    if (isNaN(escolhaNum) || escolhaNum < 1 || escolhaNum > lista.length) {
+                        console.log(`⚠️ Escolha inválida: ${escolha}. Lista tem ${lista.length} itens. Ativando interruptor de erro...`);
+                        await updateLead(leadId, [
+                            { field_id: config.fields.erroEscolhaBoleto, values: [{ value: true }] },
+                            { field_id: config.fields.escolhaBoleto, values: [{ value: "" }] }
+                        ]);
+                        await sleep(2000);
+                        tentativas++;
+                        continue;
+                    }
+
                     const boleto = lista[index];
 
                     if (boleto) {
