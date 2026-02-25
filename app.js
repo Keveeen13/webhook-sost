@@ -132,8 +132,7 @@ async function gerarListaDetalhada(leadId, cnpj, resposta) {
         });
 
         let msgLista = `*Selecione o boleto desejado:*\n`;
-        const top10 = lista.slice(0, 10);
-        top10.forEach((b, i) => {
+        lista.forEach((b, i) => {
             msgLista += `[${i + 1}] Boleto ${i + 1} - [NF ${b.numnota}] - ${formatDate(b.datavencimento)} - ${formatCurrency(b.valor)} - ${b.prest} PC\n`;
         });
 
